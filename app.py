@@ -11,12 +11,12 @@ sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "Pb2"))
 sys.path.insert(0, "/var/task")
 
+login_engine = None
 try:
     import login_engine
     print("[+] login_engine imported successfully!", flush=True)
 except Exception as e:
-    print(f"[-] FATAL ERROR importing login_engine: {e}", flush=True)
-    raise e
+    print(f"[-] CRITICAL WARNING: Failed to import login_engine: {e}", flush=True)
 
 # ═══════════ REDIS SETUP ═══════════
 try:
