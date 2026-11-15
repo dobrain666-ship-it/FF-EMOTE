@@ -4,4 +4,5 @@ upstash-redis==1.1.0
 requests
 protobuf>=4.25.3
 httpx
+google-play-scraper
 grpcio
