@@ -1,29 +1,17 @@
-import json, os, requests, time, re, sys, asyncio, random, base64, gzip, socket, ssl, struct
-import urllib.parse, urllib.request
+import base64, gzip, json, queue, re, socket, ssl, struct, threading, time
+import urllib.parse, urllib.request, os, random
 from flask import Flask, request, jsonify
 from datetime import datetime
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
 
-# ═══════════ PATH FIX FOR VERCEL ═══════════
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BASE_DIR)
-sys.path.insert(0, os.path.join(BASE_DIR, "Pb2"))
-sys.path.insert(0, "/var/task")
-
-login_engine = None
-try:
-    import login_engine
-    print("[+] login_engine imported successfully!", flush=True)
-except Exception as e:
-    print(f"[-] CRITICAL: login_engine failed: {e}", flush=True)
-
+# ═══════════ REDIS SETUP (CACHE) ═══════════
 try:
     from upstash_redis import Redis
     redis = Redis(url="https://honest-cod-92290.upstash.io", token="gQAAAAAAAWiCAAIgcDE3NjI3NDFmM2MyYzU0MzVlOWY3Yjc5YzRlYWVlNzRlZQ")
 except ImportError:
     redis = None
+    print("[-] upstash-redis not installed")
 
+# ═══════════ CONFIG & BACKUP ACCOUNTS ═══════════
 BACKUP_ACCOUNTS = [
     {"uid": "8455985312", "pass": "Pass_B6F0418685FE0470", "region": "PK"},
     {"uid": "8455985610", "pass": "Pass_04094031D2C60265", "region": "PK"},
@@ -34,12 +22,63 @@ BACKUP_ACCOUNTS = [
 
 STATIC_KEY = b"Yg&tc%DEuh6%Zc^8"
 STATIC_IV  = b"6oyZDr22E3ychjM%"
-REGION_BYTE = {"BD": 0x19, "IND": 0x14, "PK": 0x15}
+CLIENT_SECRET = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
+APP_ID = "100067"
+OAUTH_URL = "https://100067.connect.garena.com/oauth/guest/token/grant"
+MAJOR_LOGIN_URL = "https://loginbp.ppmainecoonghj.com/MajorLogin"
+DEFAULT_CLIENT_HOST = "https://loginbp.ppmainecoonghj.com/"
+CLIENT_VERSION, RELEASE_VERSION, REGION = "2.133.11", "OB55", "PK"
+
 AUTH_OPCODES = (0x93, 0x95, 0x89, 0x7B, 0x69, 0x8F, 0x78, 0x83)
 ONLINE_OPCODES = (0x8D, 0x86, 0x67) + AUTH_OPCODES
+REGION_BYTE = {"BD": 0x19, "IND": 0x14, "PK": 0x15}
 
-def aes_enc(data, key=STATIC_KEY, iv=STATIC_IV): 
-    return AES.new(key, AES.MODE_CBC, iv).encrypt(pad(data, 16))
+DEFAULT_EMOTE_ID = 909000001
+
+TEMPLATE_UID, TEMPLATE_CODE = b"18827556186", b"9809812"
+JOIN_TEMPLATE_B64 = (
+    "CAQSzwoiCAEJChIZICcpKgc5ODA5ODEyMAZAAUq5CQoZSU5ESUFfTk9USU5JVD8xODgyNzU1NjE4NhAXGvcDd19ZUBQDCEQEAg4I"
+    "U1YNB1ABWwMCWQJUVwQOVgAIU1ddAA9TAlMLABsAB0R0W0VBThoIFAAfGwAESQVRfHoLXm5Ja3l/Z05Eem5ff3wHcA1gfABxdQwV"
+    "CU1jBV9hVV5oZ1J/BG9vB39EcU1+A0x3XWRWdH8FG1dZVkUZZn0adUhIA0pgXHB9Yl1jTmBYZlRZVwVUUVoPUX4DCXkCA3wKEQkL"
+    "TVFcVll9V2Zac2gHHVNmUUMNA2Rgc35ES3pacAgUCkRMBmYXWmVnGm0LfEtrXEtaRHxeThl2E15OS3ALFgdLaHx2AWdqYlcAZH9r"
+    "am9QYktERAF0AEJTS1BBBRIPSX1eQmJfY2ZIRldNYw9HDl0CAAB6XH14XlZQXwwVCQlKckdAe05hQ3J9WlQAZ3N5anx/d09iemUa"
+    "WXpPBRIFRF9/e08HHUJ/Vn5Td2J9c0RweghCWHoJeVABVA8bDE1bSEl8TFNBfmB1eFBQUmxvY0RUam12BklTWlIIFAAIRFJsQGMG"
+    "TGVNXXQXYWxaYH13YWBDXXBiT0AAbwgWAk5gVnpkSnAGVwx6dloTf3hNfExgBhxnanxaVwgMFQJJZlluSX0ZAXB7UQMcClZ8WXd9"
+    "f0VPQm9QAE5aCxsHSnsMeVhZXGJ8aEFEAG1HeQ4AclAMcHENeW5lAAUiBHldVl0wDjoKEnB2YG9zZ2QcHEIIMi4xMzMuMTJIAlAC"
+    "Wv0EA2JiU1E2ekhJMkFzSUFkVjJLeW9WbGRtZ201L3lmUE1Hd09oMmlnekdJd0xKKzRxb2JJZU1ybkxOUm1xU1kxcjh3Nm5Lb3M2"
+    "Y1lqcEk0RWVUVnE2YWhLcUttN1hEVEc4UlFIWjNvOWpBMzFKbXZyRFFncmZXb3Z4YU5VbU9CNXF6UTlGZ0tGbEtqRS9hd25oOXhQ"
+    "cTdqVUlxMVUxTHpreWIydXV1QXYzemRQYkxpbUQva1FwMVMxNEpjbmdyd2NtQUtvWmE0ZHpJOFkyanZ3ZTJ3QWVLbERxMU5VWSsx"
+    "WDVhcXY3Unl1bDIzVVR0eUkzajBhbEI3NC91SkhGUC83NFhncVFHRHhzcDRJeUIxUWFDcWZ1M3I0VVdheUlMd1BXMGJjZC9sQkF4"
+    "Um43RUg5aXhBUTdleEdVdWdHVzBVZ0NrMHBXenAvNWNWZVB0cTRybzlWRmNHN1VWbVlTY1oxZm1lWjdvUHIrNXpuemlSS1V5bUR1"
+    "L1JhNHMyY2VUczVaKzFzZ1RwVXAwZk5mNXV5dzBDd1VzeTdsVTdzTGtVZWJ3NThjeGtSYkNVUUFTVWVudGk4NGNyazVhdks4aXVS"
+    "elFsbVpNb3VSb1M4ZGhxWFo2NU1FTDlyVzFTWmFtMEVxNnRFajYxMHgxSEFjUzlVUlVLUG15OHg1QWc3Z2pqVnpIQU1DbWtUVXda"
+    "TTVlYzFaazRFZ2lPd3dBbFhOeDFncGpoZW4zWlhCeTlYSFQyOXI0SkJlc3VYWlA0cEJlSkkwRjB3NGduRUFMaFZsZll2ekRiY3NO"
+    "S3pRSVhvWjk4S0ZsYW01a1pTUlhiN0RkZ1NOVFhsV2xWWER3enFrPVoNCgRJREMxED0aA0lORFoNCgRJREMyEBEaA0lORGoCZW6C"
+    "AQQ3T1IZogEFCAMQ+QKiAQUIBBCHA6IBBQgFEJ8BogEFCB0QyAGiAQQIFhBcogEFCA4QkAGiAQIIFboBFWFfNTg2OTU0NjgyNDM0"
+    "MTM4Mzk3N9oBBAgCEAQ="
+)
+
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad, unpad
+    _AES_BACKEND = "pycryptodome"
+    def aes_enc(data, key=STATIC_KEY, iv=STATIC_IV): return AES.new(key, AES.MODE_CBC, iv).encrypt(pad(data, 16))
+    def aes_dec(data, key=STATIC_KEY, iv=STATIC_IV): return unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(data), 16)
+except ImportError:
+    from cryptography.hazmat.primitives import padding as _pd
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    _AES_BACKEND = "cryptography"
+    def aes_enc(data, key=STATIC_KEY, iv=STATIC_IV):
+        p = _pd.PKCS7(128).padder(); c = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+        return c.update(p.update(data) + p.finalize()) + c.finalize()
+    def aes_dec(data, key=STATIC_KEY, iv=STATIC_IV):
+        c = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor(); u = _pd.PKCS7(128).unpadder()
+        return u.update(c.update(data) + c.finalize()) + u.finalize()
+
+def aes_dec_raw(data, key=STATIC_KEY, iv=STATIC_IV):
+    if not data or len(data) % 16 != 0: return None
+    try: return AES.new(key, AES.MODE_CBC, iv).decrypt(data)
+    except: return None
 
 def _wv(n):
     out = bytearray()
@@ -48,6 +87,30 @@ def _wv(n):
         if n: out.append(b | 0x80)
         else: out.append(b); return bytes(out)
 
+def _rv(b, i):
+    n = s = 0
+    while True:
+        c = b[i]; i += 1
+        n |= (c & 0x7F) << s; s += 7
+        if not c & 0x80: return n, i
+
+def pb_parse(b):
+    i, out = 0, []
+    while i < len(b):
+        k, i = _rv(b, i)
+        f, w = k >> 3, k & 7
+        if f == 0: raise ValueError("field 0")
+        if w == 0: v, i = _rv(b, i)
+        elif w == 2:
+            l, i = _rv(b, i)
+            if i + l > len(b): raise ValueError("overrun")
+            v, i = b[i:i + l], i + l
+        elif w == 1: v, i = b[i:i + 8], i + 8
+        elif w == 5: v, i = b[i:i + 4], i + 4
+        else: raise ValueError("wire type")
+        out.append((f, w, v))
+    return out
+
 def pb_build(fields):
     out = bytearray()
     for f, w, v in fields:
@@ -55,37 +118,253 @@ def pb_build(fields):
         out += _wv(v) if w == 0 else (_wv(len(v)) + v if w == 2 else v)
     return bytes(out)
 
-def do_login(account):
-    uid, password, region = account["uid"], account["pass"], account["region"]
-    if not login_engine:
-        print(f"[-] login_engine is None, cannot login {uid}", flush=True)
-        return None
-        
-    print(f"\n[DEBUG] Logging in {uid} via login_engine...", flush=True)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+def pb_get(fields, n):
+    for f, w, v in fields:
+        if f == n: return v
+
+def pb_encode(d):
+    out = []
+    for k, v in d.items():
+        if isinstance(v, int): out.append((k, 0, v))
+        else: out.append((k, 2, v.encode() if isinstance(v, str) else bytes(v)))
+    return pb_build(out)
+
+def retarget(b, repl, depth=0):
+    if b and all(32 <= c < 127 for c in b):
+        for old, new in repl.items(): b = b.replace(old, new)
+        return b
     try:
-        r = loop.run_until_complete(login_engine.do_login(uid, password, region))
-        if not r:
-            print(f"[-] {uid} login_engine returned None", flush=True)
-            return None
-        session = {
-            "uid": int(r.get("bot_uid")),
-            "jwt": r.get("token"),
-            "key": r.get("key").hex() if isinstance(r.get("key"), (bytes, bytearray)) else r.get("key"),
-            "iv": r.get("iv").hex() if isinstance(r.get("iv"), (bytes, bytearray)) else r.get("iv"),
-            "kts": int(r.get("timestamp", time.time())),
-            "online_ip": r.get("online_ip"),
-            "online_port": int(r.get("online_port")),
-            "region": r.get("region", region)
-        }
-        print(f"[+] {uid} Login OK. Bot UID: {session['uid']}", flush=True)
-        return session
-    except Exception as e:
-        print(f"[-] {uid} login_engine Exception: {type(e).__name__}: {e}", flush=True)
-        return None
-    finally:
-        loop.close()
+        fields = pb_parse(b)
+        if depth < 8 and fields and pb_build(fields) == b:
+            return pb_build([(f, w, retarget(v, repl, depth + 1) if w == 2 else v) for f, w, v in fields])
+    except Exception: pass
+    for old, new in repl.items(): b = b.replace(old, new)
+    return b
+
+def http_post(url, data, headers, verify=True, timeout=30):
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    ctx = None if verify else ssl._create_unverified_context()
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r: return r.status, r.read()
+
+def _v_major_login(fields):
+    nums = {f for f, w, v in fields}
+    if 8 in nums:
+        for f, w, v in fields:
+            if f == 8 and w == 2:
+                if isinstance(v, bytes):
+                    try:
+                        s = v.decode("utf-8", "ignore")
+                        if s.count(".") == 2: return True
+                    except Exception: pass
+                elif isinstance(v, str) and v.count(".") == 2: return True
+        return False
+    return 1 in nums and 21 in nums
+
+def _v_login_data(fields):
+    for f, w, v in fields:
+        if f == 14 and w == 2 and isinstance(v, bytes):
+            try:
+                s = v.decode("utf-8", "ignore")
+                return ":" in s and s.count(".") >= 1
+            except Exception: return False
+    return False
+
+def parse_response(raw, validator):
+    if raw[:2] == b"\x1f\x8b":
+        try: raw = gzip.decompress(raw)
+        except Exception: pass
+    candidates = []
+    try: candidates.append(("aes", aes_dec(raw, STATIC_KEY, STATIC_IV)))
+    except Exception:
+        d = aes_dec_raw(raw, STATIC_KEY, STATIC_IV)
+        if d: candidates.append(("aes-raw", d))
+    if len(raw) > 64:
+        try: candidates.append(("aes@64", aes_dec(raw[64:], STATIC_KEY, STATIC_IV)))
+        except Exception:
+            d = aes_dec_raw(raw[64:], STATIC_KEY, STATIC_IV)
+            if d: candidates.append(("aes-raw@64", d))
+        candidates.append(("raw@64", raw[64:]))
+    candidates.append(("raw", raw))
+    for label, buf in candidates:
+        if not buf: continue
+        try: fields = pb_parse(buf)
+        except Exception: continue
+        if fields and validator(fields): return fields
+    raise ValueError("cannot parse server response")
+
+def _s(fields, n, default=""):
+    v = pb_get(fields, n)
+    return v.decode(errors="ignore") if isinstance(v, bytes) else default
+
+def oauth(uid, password, verify):
+    body = urllib.parse.urlencode({"uid": uid, "password": password, "response_type": "token", "client_type": "2", "client_secret": CLIENT_SECRET, "client_id": APP_ID}).encode()
+    st, raw = http_post(OAUTH_URL, body, {"User-Agent": "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;en;IN;)", "Content-Type": "application/x-www-form-urlencoded", "Connection": "close"}, verify, 20)
+    j = json.loads(raw)
+    if not j.get("open_id") or not j.get("access_token"): raise RuntimeError("OAuth failed: %s" % j)
+    return j["open_id"], j["access_token"]
+
+def _client_info(open_id, access_token, platform="4", extra=None):
+    d = {3: datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 4: "free fire", 5: 1, 7: CLIENT_VERSION,
+         8: "Android OS 10 / API-29 (QP1A.190711.020/1617006012)", 9: "Handheld", 10: "Vi India", 11: "WIFI",
+         12: 1600, 13: 720, 14: "320", 15: "ARM64 FP ASIMD AES | 2301 | 8", 16: 2799,
+         17: "PowerVR Rogue GE8320", 18: "OpenGL ES 3.2 build 1.11@5425693",
+         19: "Google|9f7d6b8b-b10c-454a-852d-06332cd498eb", 20: "151.158.158.220", 21: "en",
+         22: open_id, 23: platform, 24: "Handheld", 25: "realme RMX2189", 26: REGION,
+         29: access_token, 30: 1, 41: "Vi India", 42: "WIFI", 57: "1ac4b80ecf0478a44203bf8fac6120f5",
+         60: 19799, 61: 2536, 62: 5056, 64: 2768, 65: 19999, 66: 2536, 67: 19799, 73: 1,
+         74: "/data/app/com.dts.freefiremax-ShI7E0dK8p1IiZ785pvuVQ==/lib/arm64", 76: 2,
+         77: "38f4751a330688ab124c2c804cec90a5|/data/app/com.dts.freefiremax-ShI7E0dK8p1IiZ785pvuVQ==/base.apk",
+         78: 2, 79: 2, 81: "64", 83: "2019118527", 86: "OpenGLES3", 87: 3071, 88: 4, 92: 67920,
+         93: "android_max",
+         94: "KqsHT+UrR1HKqb6+1db+Ofei+NtZr2+hbiBo3yKDL8w+8E3S5qF2IgEEe1fFQFyHRzl4iyHjHp+QsfeLbjJ6+DidTiKxm0ak2uYYa6QR4nAUdlZR",
+         95: 111107, 96: '{"cur_rate":null,"support_etc2":true}', 97: 1, 98: 1, 99: platform, 100: platform,
+         102: "", 104: 83812, 105: 1,
+         106: "https://dl-bs.ggpolarbear.com/live/ABHotUpdates/|https://core-bs.ggpolarbear.com/live/ABHotUpdates/|a4332cb1c1a84e51dd77441e4856ed5a",
+         107: "1.9393e7b8e53e8aeb"}
+    d.update(extra or {})
+    return pb_encode(d)
+
+def _ga_headers(bearer=""):
+    return {
+        "User-Agent": "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
+        "Accept": "*/*", "Accept-Encoding": "deflate, gzip",
+        "X-GA-SV": str(int(time.time())), "Authorization": "Bearer " + bearer,
+        "X-GA": "v1 1", "ReleaseVersion": RELEASE_VERSION,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Unity-Version": "2018.4.12f1",
+    }
+
+def major_login(open_id, access_token, verify):
+    st, raw = http_post(MAJOR_LOGIN_URL, aes_enc(_client_info(open_id, access_token)), _ga_headers(), verify)
+    r = parse_response(raw, _v_major_login)
+    bot_uid = pb_get(r, 1)
+    jwt = _s(r, 8)
+    key = pb_get(r, 22)
+    iv  = pb_get(r, 23)
+    if not isinstance(bot_uid, int): raise RuntimeError("MajorLogin field 1 is not a varint account_id")
+    if not isinstance(key, (bytes, bytearray)) or len(key) != 16: raise RuntimeError("MajorLogin field 22 is not a 16-byte KEY")
+    if not isinstance(iv, (bytes, bytearray)) or len(iv) != 16: raise RuntimeError("MajorLogin field 23 is not a 16-byte IV")
+    if jwt.count(".") != 2: raise RuntimeError("MajorLogin field 8 is not a JWT")
+    return {"jwt": jwt, "key": bytes(key), "iv": bytes(iv), "uid": bot_uid, "kts": pb_get(r, 21) or int(time.time()), "client_url": _s(r, 10) or DEFAULT_CLIENT_HOST}
+
+def get_login_data(login, open_id, access_token, verify):
+    body = aes_enc(_client_info(open_id, access_token, "4", {20: "27.59.76.15", 90: "New Delhi", 91: "DL", 99: "0"}))
+    st, raw = http_post(login["client_url"].rstrip("/") + "/GetLoginData", body, _ga_headers(login["jwt"]), verify, 20)
+    r = parse_response(raw, _v_login_data)
+    online = _s(r, 14)
+    if ":" not in online: raise RuntimeError("no online server in GetLoginData")
+    return {"online": online, "chat": _s(r, 32), "region": _s(r, 3, REGION).upper()}
+
+def frame(ptype_hex, payload, key, iv):
+    ct = aes_enc(payload, key, iv)
+    return bytes.fromhex(ptype_hex) + struct.pack(">I", len(ct)) + ct
+
+def build_auth(opcode, region, uid, kts, jwt, key, iv):
+    enc = aes_enc(jwt.encode(), key, iv)
+    return (bytes([opcode, REGION_BYTE.get(region.upper(), 0x15)]) + int(uid).to_bytes(8, "big") + int(kts).to_bytes(4, "big") + b"\x00\x00\x00\x00" + struct.pack(">I", len(enc)) + enc)
+
+def build_heartbeat(key, iv):
+    return frame("0e14", b"\x08\x20", key, iv)
+
+def build_join(team_code, uid, key, iv):
+    tpl = base64.b64decode("".join(JOIN_TEMPLATE_B64))
+    return frame("0514", retarget(tpl, {TEMPLATE_UID: str(uid).encode(), TEMPLATE_CODE: str(team_code).encode()}), key, iv)
+
+def build_emote(my_uid, target_uid, emote_id, key, iv):
+    inner = pb_build([(1, 0, int(my_uid)), (2, 0, int(emote_id)), (5, 2, pb_build([(1, 0, int(target_uid)), (3, 0, int(emote_id))]))])
+    return frame("0514", pb_build([(1, 0, 21), (2, 2, inner)]), key, iv)
+
+def recv_frame(sock, timeout):
+    sock.settimeout(timeout)
+    def need(n):
+        buf = b""
+        while len(buf) < n:
+            c = sock.recv(n - len(buf))
+            if not c: raise ConnectionError("closed")
+            buf += c
+        return buf
+    try: h = need(5)
+    except socket.timeout: return None
+    return h[:1].hex(), need(struct.unpack(">I", h[1:])[0])
+
+class Conn:
+    def __init__(self, name, host, port, auth_packets, ping_packet, ping_every, on_frame):
+        self.name, self.host, self.port = name, host, int(port)
+        self.auth_packets, self.ping_packet, self.ping_every, self.on_frame = auth_packets, ping_packet, ping_every, on_frame
+        self.lock, self.stop, self.sock = threading.Lock(), threading.Event(), None
+    def connect(self):
+        for opcode, pkt in self.auth_packets:
+            s = socket.create_connection((self.host, self.port), timeout=15)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            print("[%s] connected %s:%s, auth opcode 0x%02x" % (self.name, self.host, self.port, opcode))
+            s.sendall(pkt)
+            try: first = recv_frame(s, 4.0)
+            except (ConnectionError, OSError): first = None
+            if first:
+                self.sock, self.first = s, first
+                print("[%s] auth reply: %s (%d bytes)" % (self.name, first[0], len(first[1])))
+                return
+            s.close()
+        raise RuntimeError("%s server never answered the auth packet" % self.name)
+    def start(self):
+        self.on_frame(self.name, *self.first)
+        threading.Thread(target=self._reader, daemon=True).start()
+        threading.Thread(target=self._pinger, daemon=True).start()
+    def send(self, data):
+        with self.lock: self.sock.sendall(data)
+    def _reader(self):
+        while not self.stop.is_set():
+            try: f = recv_frame(self.sock, 1.0)
+            except (ConnectionError, OSError):
+                print("[%s] connection closed" % self.name)
+                self.stop.set(); return
+            if f: self.on_frame(self.name, *f)
+    def _pinger(self):
+        while not self.stop.is_set():
+            try: self.send(self.ping_packet)
+            except OSError: self.stop.set(); return
+            self.stop.wait(self.ping_every)
+    def close(self):
+        self.stop.set()
+        try: self.sock.close()
+        except: pass
+
+def team_reply(ptype, body, my_uid):
+    if ptype != "05": return None
+    try: top = pb_parse(body)
+    except: return None
+    team = pb_get(top, 5)
+    if isinstance(team, bytes):
+        t = pb_parse(team)
+        uids = [pb_get(t, 1)] + [pb_get(pb_parse(v), 1) for fn, w, v in t if fn == 6 and w == 2]
+        return "joined", [u for u in uids if isinstance(u, int) and u != int(my_uid)]
+    if pb_get(top, 3) is not None and pb_get(top, 2) == 5: return "failed", pb_get(top, 3)
+    return None
+
+class Bot:
+    def __init__(self, lg):
+        self.uid = int(lg["uid"])
+        self.key, self.iv = lg["key"], lg["iv"]
+        self.verdicts = queue.Queue()
+        self.online = None
+    def on_frame(self, name, ptype, body):
+        if name == "online":
+            v = team_reply(ptype, body, self.uid)
+            if v: self.verdicts.put(v)
+    def join(self, code, wait=10.0):
+        while not self.verdicts.empty(): self.verdicts.get_nowait()
+        self.online.send(build_join(code, self.uid, self.key, self.iv))
+        print("[bot] join packet sent for team code", code)
+        try: return self.verdicts.get(timeout=wait)
+        except queue.Empty: return None
+    def emote(self, target_uid, emote_id):
+        self.online.send(build_emote(self.uid, target_uid, emote_id, self.key, self.iv))
+
+app = Flask(__name__)
+_api_lock = threading.Lock()
+
+@app.after_request
+def cors(res): res.headers["Access-Control-Allow-Origin"] = "*"; return res
 
 def get_session(account):
     if redis:
@@ -97,87 +376,79 @@ def get_session(account):
         except Exception as e: print("Redis Read Err:", e)
     
     print(f"[CACHE MISS] Doing fresh login for {account['uid']}", flush=True)
-    session = do_login(account)
-    
-    if session and redis:
-        try: 
-            redis.setex(f"ff_session_{account['uid']}", 14400, json.dumps(session))
-            print(f"[+] Saved cache for {account['uid']}", flush=True)
-        except Exception as e: print("Redis Save Err:", e)
-    return session
-
-class Conn:
-    def __init__(self, host, port, auth_pkts):
-        self.host, self.port, self.auth_pkts = host, int(port), auth_pkts
-    def connect(self):
-        for op, pkt in self.auth_pkts:
-            s = socket.create_connection((self.host, self.port), timeout=15)
-            s.sendall(pkt)
-            s.settimeout(4.0)
-            if len(s.recv(5)) == 5: 
-                self.sock = s; 
-                return
-            s.close()
-        raise RuntimeError("TCP Auth failed")
-
-app = Flask(__name__)
-
-@app.after_request
-def cors(res): 
-    res.headers["Access-Control-Allow-Origin"] = "*"
-    return res
+    try:
+        open_id, access_token = oauth(account["uid"], account["pass"], True)
+        login = major_login(open_id, access_token, True)
+        login_data = get_login_data(login, open_id, access_token, True)
+        
+        host, port = login_data["online"].rsplit(":", 1)
+        session = {
+            "uid": login["uid"], "jwt": login["jwt"], "key": login["key"].hex(), "iv": login["iv"].hex(),
+            "kts": login["kts"], "region": login_data["region"], "online_ip": host, "online_port": int(port)
+        }
+        if redis:
+            try: redis.setex(f"ff_session_{account['uid']}", 14400, json.dumps(session))
+            except: pass
+        return session
+    except Exception as e:
+        print(f"[-] Login failed for {account['uid']}: {e}", flush=True)
+        return None
 
 @app.get("/api/refresh")
-def refresh_all():
+def api_refresh():
     results = {}
     for acc in BACKUP_ACCOUNTS:
         s = get_session(acc)
         results[acc['uid']] = "Cached" if s else "Failed"
     return jsonify(ok=True, msg="Cron refresh done", results=results)
 
-@app.get("/rishu")
-def rishu():
-    tc = request.args.get("Tc")
-    eid = request.args.get("Emote_id")
-    tuid = request.args.get("Target_Uid")
-    
-    if not tc or not eid or not tuid:
-        return jsonify(ok=False, error="Tc, Emote_id, and Target_Uid are required"), 400
-
+def run_api_emote(team_code, emote_id, target_uid=None):
     acc = random.choice(BACKUP_ACCOUNTS)
-    try:
-        lg = get_session(acc)
-        if not lg: 
-            return jsonify(ok=False, error="Login failed"), 500
-        
-        key, iv = bytes.fromhex(lg["key"]), bytes.fromhex(lg["iv"])
-        
-        auth_pkts = []
-        for op in ONLINE_OPCODES:
-            enc_jwt = aes_enc(lg["jwt"].encode(), key, iv)
-            pkt = bytes([op, REGION_BYTE.get(lg["region"].upper(), 0x15)]) + int(lg["uid"]).to_bytes(8, "big") + int(lg["kts"]).to_bytes(4, "big") + b"\x00\x00\x00\x00" + struct.pack(">I", len(enc_jwt)) + enc_jwt
-            auth_pkts.append((op, pkt))
-            
-        conn = Conn(lg["online_ip"], lg["online_port"], auth_pkts)
-        conn.connect()
-        
-        inner = pb_build([(1, 0, int(lg["uid"])), (2, 0, int(eid)), (5, 2, pb_build([(1, 0, int(tuid)), (3, 0, int(eid))]))])
-        payload = pb_build([(1, 0, 21), (2, 2, inner)])
-        enc_emote = aes_enc(payload, key, iv)
-        emote_pkt = bytes.fromhex("0514") + struct.pack(">I", len(enc_emote)) + enc_emote
-        
-        conn.sock.sendall(emote_pkt)
-        time.sleep(1.0)
-        conn.sock.close()
-        
-        return jsonify(ok=True, msg=f"Sent via {lg['uid']}")
-    except Exception as e:
-        print(f"[-] Emote Error: {e}", flush=True)
-        return jsonify(ok=False, error=str(e)), 500
+    lg = get_session(acc)
+    if not lg: raise RuntimeError("Login failed")
+    
+    key, iv = bytes.fromhex(lg["key"]), bytes.fromhex(lg["iv"])
+    bot = Bot(lg)
+    bot.online = Conn("online", lg["online_ip"], lg["online_port"],
+        [(op, build_auth(op, lg["region"], lg["uid"], lg["kts"], lg["jwt"], key, iv)) for op in ONLINE_OPCODES],
+        build_heartbeat(key, iv), 10.0, bot.on_frame)
+    
+    bot.online.connect()
+    bot.online.start()
+    verdict = bot.join(team_code, wait=10.0)
+    
+    if verdict is None: raise RuntimeError("No team-join response received")
+    if verdict[0] != "joined": raise RuntimeError("Team join refused: %s" % verdict[1])
+    
+    members = verdict[1]
+    if target_uid is not None: targets = [int(target_uid)]
+    else: targets = list(dict.fromkeys(int(x) for x in members))
+    if not targets: raise RuntimeError("No teammate UID returned; provide Target_Uid")
+    
+    for uid_to_emote in targets:
+        bot.emote(uid_to_emote, int(emote_id))
+    time.sleep(1.5)
+    bot.online.close()
+    return {"ok": True, "boT_Uid": lg["uid"], "msg": "Emote sent"}
 
-@app.get("/")
-def health():
-    return jsonify(ok=True, status="Online", msg="API Running")
+@app.get("/rishu")
+def rishu_endpoint():
+    team_code = (request.args.get("Tc") or "").strip()
+    emote_value = (request.args.get("Emote_id") or "").strip()
+    target_value = (request.args.get("Target_Uid") or request.args.get("Target_uid") or request.args.get("target_uid") or "").strip()
+    
+    if not team_code.isdigit(): return jsonify(ok=False, error="Tc must be numeric"), 400
+    if not emote_value: emote_value = str(DEFAULT_EMOTE_ID)
+    if not emote_value.isdigit(): return jsonify(ok=False, error="Emote_id must be numeric"), 400
+    if target_value and not target_value.isdigit(): return jsonify(ok=False, error="Target_Uid must be numeric"), 400
+    
+    try:
+        with _api_lock:
+            result = run_api_emote(team_code, int(emote_value), int(target_value) if target_value else None)
+        return jsonify(result), 200
+    except Exception as exc:
+        print("[api] request failed:", exc)
+        return jsonify(ok=False, error=str(exc)), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), threaded=True)
