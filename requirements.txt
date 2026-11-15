@@ -3,4 +3,3 @@ requests
 pycryptodome
 upstash-redis
 gunicorn
-apscheduler

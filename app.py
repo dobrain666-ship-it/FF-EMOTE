@@ -1,21 +1,11 @@
 import base64, gzip, json, queue, re, socket, ssl, struct, threading, time
-import urllib.parse, urllib.request, os, random
+import urllib.parse, urllib.request, os
 from flask import Flask, request, jsonify
 from datetime import datetime
-from apscheduler.schedulers.background import BackgroundScheduler
-
-# ═══════════ REDIS SETUP ═══════════
-try:
-    from upstash_redis import Redis
-    redis = Redis(url="https://honest-cod-92290.upstash.io", token="gQAAAAAAAWiCAAIgcDE3NjI3NDFmM2MyYzU0MzVlOWY3Yjc5YzRlYWVlNzRlZQ")
-except ImportError:
-    redis = None
-    print("[-] upstash-redis not installed")
 
 # ═══════════ CONFIG & ACCOUNT ═══════════
-BACKUP_ACCOUNTS = [
-    {"uid": "8457006743", "pass": "Pass_DC41A5900E6B6794", "region": "PK"}
-]
+BOT_UID = "8457006743"
+BOT_PASSWORD = "Pass_DC41A5900E6B6794"
 
 STATIC_KEY = b"Yg&tc%DEuh6%Zc^8"
 STATIC_IV  = b"6oyZDr22E3ychjM%"
@@ -24,12 +14,14 @@ APP_ID = "100067"
 OAUTH_URL = "https://100067.connect.garena.com/oauth/guest/token/grant"
 MAJOR_LOGIN_URL = "https://loginbp.ppmainecoonghj.com/MajorLogin"
 DEFAULT_CLIENT_HOST = "https://loginbp.ppmainecoonghj.com/"
-CLIENT_VERSION, RELEASE_VERSION = "2.133.11", "OB55"
+CLIENT_VERSION, RELEASE_VERSION, REGION = "2.133.11", "OB55", "PK"
 
 AUTH_OPCODES = (0x93, 0x95, 0x89, 0x7B, 0x69, 0x8F, 0x78, 0x83)
 ONLINE_OPCODES = (0x8D, 0x86, 0x67) + AUTH_OPCODES
 REGION_BYTE = {"BD": 0x19, "IND": 0x14, "PK": 0x15}
+
 DEFAULT_EMOTE_ID = 909000001
+TARGET_UID = 6112290940
 
 TEMPLATE_UID, TEMPLATE_CODE = b"18827556186", b"9809812"
 JOIN_TEMPLATE_B64 = (
@@ -113,18 +105,6 @@ def pb_encode(d):
         else: out.append((k, 2, v.encode() if isinstance(v, str) else bytes(v)))
     return pb_build(out)
 
-def retarget(b, repl, depth=0):
-    if b and all(32 <= c < 127 for c in b):
-        for old, new in repl.items(): b = b.replace(old, new)
-        return b
-    try:
-        fields = pb_parse(b)
-        if depth < 8 and fields and pb_build(fields) == b:
-            return pb_build([(f, w, retarget(v, repl, depth + 1) if w == 2 else v) for f, w, v in fields])
-    except: pass
-    for old, new in repl.items(): b = b.replace(old, new)
-    return b
-
 def http_post(url, data, headers, verify=True, timeout=30):
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     ctx = None if verify else ssl._create_unverified_context()
@@ -148,7 +128,7 @@ def oauth(uid, password, verify):
     body = urllib.parse.urlencode({"uid": uid, "password": password, "response_type": "token", "client_type": "2", "client_secret": CLIENT_SECRET, "client_id": APP_ID}).encode()
     st, raw = http_post(OAUTH_URL, body, {"User-Agent": "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;en;PK;)", "Content-Type": "application/x-www-form-urlencoded", "Connection": "close"}, verify, 20)
     j = json.loads(raw)
-    if not j.get("open_id") or not j.get("access_token"): raise RuntimeError("OAuth failed: %s" % j)
+    if not j.get("open_id") or not j.get("access_token"): raise RuntimeError("OAuth failed")
     return j["open_id"], j["access_token"]
 
 def _client_info(open_id, access_token, platform="4", extra=None):
@@ -157,7 +137,7 @@ def _client_info(open_id, access_token, platform="4", extra=None):
          12: 1600, 13: 720, 14: "320", 15: "ARM64 FP ASIMD AES | 2301 | 8", 16: 2799,
          17: "PowerVR Rogue GE8320", 18: "OpenGL ES 3.2 build 1.11@5425693",
          19: "Google|9f7d6b8b-b10c-454a-852d-06332cd498eb", 20: "151.158.158.220", 21: "en",
-         22: open_id, 23: platform, 24: "Handheld", 25: "realme RMX2189", 26: "PK",
+         22: open_id, 23: platform, 24: "Handheld", 25: "realme RMX2189", 26: REGION,
          29: access_token, 30: 1, 41: "Vi India", 42: "WIFI", 57: "1ac4b80ecf0478a44203bf8fac6120f5",
          60: 19799, 61: 2536, 62: 5056, 64: 2768, 65: 19999, 66: 2536, 67: 19799, 73: 1,
          74: "/data/app/com.dts.freefiremax-ShI7E0dK8p1IiZ785pvuVQ==/lib/arm64", 76: 2,
@@ -175,96 +155,181 @@ def _client_info(open_id, access_token, platform="4", extra=None):
 def _ga_headers(bearer=""):
     return {"User-Agent": "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)", "Accept": "*/*", "Accept-Encoding": "deflate, gzip", "X-GA-SV": str(int(time.time())), "Authorization": "Bearer " + bearer, "X-GA": "v1 1", "ReleaseVersion": RELEASE_VERSION, "Content-Type": "application/x-www-form-urlencoded", "X-Unity-Version": "2018.4.12f1"}
 
-def do_login(account):
-    open_id, access_token = oauth(account["uid"], account["pass"], True)
-    st, raw = http_post(MAJOR_LOGIN_URL, aes_enc(_client_info(open_id, access_token)), _ga_headers(), True)
+def major_login(open_id, access_token, verify):
+    st, raw = http_post(MAJOR_LOGIN_URL, aes_enc(_client_info(open_id, access_token)), _ga_headers(), verify)
     r = parse_response(raw, lambda f: True)
-    bot_uid, jwt, key, iv = pb_get(r, 1), _s(r, 8), pb_get(r, 22), pb_get(r, 23)
-    
-    st, raw = http_post(_s(r, 10).rstrip("/") + "/GetLoginData", aes_enc(_client_info(open_id, access_token, "4", {20: "27.59.76.15", 90: "New Delhi", 91: "DL", 99: "0"})), _ga_headers(jwt), True, 20)
-    r2 = parse_response(raw, lambda f: True)
-    online = _s(r2, 14)
-    
-    return {"uid": bot_uid, "jwt": jwt, "key": key.hex(), "iv": iv.hex(), "kts": pb_get(r, 21), "online_ip": online.split(":")[0], "online_port": int(online.split(":")[1]), "region": _s(r2, 3, "PK")}
+    return {"jwt": _s(r, 8), "key": pb_get(r, 22), "iv": pb_get(r, 23), "uid": pb_get(r, 1), "kts": pb_get(r, 21), "client_url": _s(r, 10) or DEFAULT_CLIENT_HOST}
 
-def get_session(account):
-    if redis:
-        try:
-            cached = redis.get(f"ff_session_{account['uid']}")
-            if cached:
-                print(f"[CACHE HIT] {account['uid']}", flush=True)
-                return json.loads(cached)
-        except: pass
-    
-    print(f"[CACHE MISS] Fresh login for {account['uid']}", flush=True)
-    try:
-        session = do_login(account)
-        if redis:
-            try: redis.setex(f"ff_session_{account['uid']}", 14400, json.dumps(session))
-            except: pass
-        return session
-    except Exception as e:
-        print(f"[-] Login failed for {account['uid']}: {e}", flush=True)
-        return None
+def get_login_data(login, open_id, access_token, verify):
+    st, raw = http_post(login["client_url"].rstrip("/") + "/GetLoginData", aes_enc(_client_info(open_id, access_token, "4", {20: "27.59.76.15", 90: "New Delhi", 91: "DL", 99: "0"})), _ga_headers(login["jwt"]), verify, 20)
+    r = parse_response(raw, lambda f: True)
+    online = _s(r, 14)
+    return {"online": online, "chat": _s(r, 32), "region": _s(r, 3, REGION).upper()}
 
-# ═══════════ 4-HOUR AUTO REFRESH ═══════════
-def auto_refresh_job():
-    print("[*] 4-Hour Cron: Refreshing tokens...", flush=True)
-    for acc in BACKUP_ACCOUNTS:
-        get_session(acc) # Forces login if expired
+def frame(ptype_hex, payload, key, iv):
+    ct = aes_enc(payload, key, iv)
+    return bytes.fromhex(ptype_hex) + struct.pack(">I", len(ct)) + ct
 
-scheduler = BackgroundScheduler()
-scheduler.add_job(auto_refresh_job, 'interval', hours=4)
-scheduler.start()
+def build_auth(opcode, region, uid, kts, jwt, key, iv):
+    enc = aes_enc(jwt.encode(), key, iv)
+    return (bytes([opcode, REGION_BYTE.get(region.upper(), 0x15)]) + int(uid).to_bytes(8, "big") + int(kts).to_bytes(4, "big") + b"\x00\x00\x00\x00" + struct.pack(">I", len(enc)) + enc)
+
+def build_heartbeat(key, iv):
+    return frame("0e14", b"\x08\x20", key, iv)
+
+def build_join(team_code, uid, key, iv):
+    tpl = base64.b64decode("".join(JOIN_TEMPLATE_B64))
+    return frame("0514", retarget(tpl, {TEMPLATE_UID: str(uid).encode(), TEMPLATE_CODE: str(team_code).encode()}), key, iv)
+
+def build_emote(my_uid, target_uid, emote_id, key, iv):
+    inner = pb_build([(1, 0, int(my_uid)), (2, 0, int(emote_id)), (5, 2, pb_build([(1, 0, int(target_uid)), (3, 0, int(emote_id))]))])
+    return frame("0514", pb_build([(1, 0, 21), (2, 2, inner)]), key, iv)
+
+def recv_frame(sock, timeout):
+    sock.settimeout(timeout)
+    def need(n):
+        buf = b""
+        while len(buf) < n:
+            c = sock.recv(n - len(buf))
+            if not c: raise ConnectionError("closed")
+            buf += c
+        return buf
+    try: h = need(5)
+    except socket.timeout: return None
+    return h[:1].hex(), need(struct.unpack(">I", h[1:])[0])
 
 class Conn:
-    def __init__(self, host, port, auth_pkts):
-        self.host, self.port, self.auth_pkts = host, int(port), auth_pkts
+    def __init__(self, name, host, port, auth_packets, ping_packet, ping_every, on_frame):
+        self.name, self.host, self.port = name, host, int(port)
+        self.auth_packets, self.ping_packet, self.ping_every, self.on_frame = auth_packets, ping_packet, ping_every, on_frame
+        self.lock, self.stop, self.sock = threading.Lock(), threading.Event(), None
     def connect(self):
-        for op, pkt in self.auth_pkts:
+        for opcode, pkt in self.auth_packets:
             s = socket.create_connection((self.host, self.port), timeout=15)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             s.sendall(pkt)
-            s.settimeout(4.0)
-            if len(s.recv(5)) == 5: self.sock = s; return
+            try: first = recv_frame(s, 4.0)
+            except: first = None
+            if first:
+                self.sock, self.first = s, first
+                return
             s.close()
         raise RuntimeError("TCP Auth failed")
+    def start(self):
+        self.on_frame(self.name, *self.first)
+        threading.Thread(target=self._reader, daemon=True).start()
+        threading.Thread(target=self._pinger, daemon=True).start()
+    def send(self, data):
+        with self.lock: self.sock.sendall(data)
+    def _reader(self):
+        while not self.stop.is_set():
+            try: f = recv_frame(self.sock, 1.0)
+            except: self.stop.set(); return
+            if f: self.on_frame(self.name, *f)
+    def _pinger(self):
+        while not self.stop.is_set():
+            try: self.send(self.ping_packet)
+            except: self.stop.set(); return
+            self.stop.wait(self.ping_every)
+    def close(self):
+        self.stop.set()
+        try: self.sock.close()
+        except: pass
+
+def team_reply(ptype, body, my_uid):
+    if ptype != "05": return None
+    try: top = pb_parse(body)
+    except: return None
+    team = pb_get(top, 5)
+    if isinstance(team, bytes):
+        t = pb_parse(team)
+        uids = [pb_get(t, 1)] + [pb_get(pb_parse(v), 1) for fn, w, v in t if fn == 6 and w == 2]
+        return "joined", [u for u in uids if isinstance(u, int) and u != int(my_uid)]
+    if pb_get(top, 3) is not None and pb_get(top, 2) == 5: return "failed", pb_get(top, 3)
+    return None
+
+class Bot:
+    def __init__(self, lg):
+        self.uid = int(lg["uid"])
+        self.key, self.iv = lg["key"], lg["iv"]
+        self.verdicts = queue.Queue()
+        self.online = None
+    def on_frame(self, name, ptype, body):
+        if name == "online":
+            v = team_reply(ptype, body, self.uid)
+            if v: self.verdicts.put(v)
+    def join(self, code, wait=10.0):
+        while not self.verdicts.empty(): self.verdicts.get_nowait()
+        self.online.send(build_join(code, self.uid, self.key, self.iv))
+        try: return self.verdicts.get(timeout=wait)
+        except: return None
+    def emote(self, target_uid, emote_id):
+        self.online.send(build_emote(self.uid, target_uid, emote_id, self.key, self.iv))
 
 app = Flask(__name__)
+_api_lock = threading.Lock()
+
 @app.after_request
 def cors(res): res.headers["Access-Control-Allow-Origin"] = "*"; return res
 
-@app.get("/api/refresh")
-def refresh_all():
-    results = {}
-    for acc in BACKUP_ACCOUNTS:
-        s = get_session(acc)
-        results[acc['uid']] = "Cached" if s else "Failed"
-    return jsonify(ok=True, msg="Manual Refresh Done", results=results)
+def run_api_emote(team_code, emote_id, target_uid=None):
+    try:
+        open_id, access_token = oauth(BOT_UID, BOT_PASSWORD, True)
+        login = major_login(open_id, access_token, True)
+        login_data = get_login_data(login, open_id, access_token, True)
+        
+        host, port = login_data["online"].rsplit(":", 1)
+        region = login_data["region"]
+        key, iv = login["key"], login["iv"]
+        
+        # 1. EQUIP EMOTE via HTTP (ChooseEmote)
+        equip_payload = pb_build([(6, 2, pb_build([(1, 0, 1), (2, 0, int(emote_id))]))])
+        equip_enc = aes_enc(equip_payload, STATIC_KEY, STATIC_IV)
+        equip_url = login["client_url"].rstrip("/") + "/ChooseEmote"
+        http_post(equip_url, equip_enc, _ga_headers(login["jwt"]), True, 10)
+        time.sleep(0.5)
+
+        # 2. CONNECT TCP & SEND EMOTE
+        bot = Bot(login)
+        bot.online = Conn("online", host, int(port),
+            [(op, build_auth(op, region, login["uid"], login["kts"], login["jwt"], key, iv)) for op in ONLINE_OPCODES],
+            build_heartbeat(key, iv), 10.0, bot.on_frame)
+        
+        bot.online.connect()
+        bot.online.start()
+        verdict = bot.join(team_code, wait=10.0)
+        
+        if verdict is None: raise RuntimeError("No team-join response")
+        if verdict[0] != "joined": raise RuntimeError("Team join refused: %s" % verdict[1])
+        
+        members = verdict[1]
+        if target_uid is not None: targets = [int(target_uid)]
+        else: targets = list(dict.fromkeys(int(x) for x in members))
+        if not targets: raise RuntimeError("No teammate UID returned")
+        
+        for uid_to_emote in targets:
+            bot.emote(uid_to_emote, int(emote_id))
+        time.sleep(1.5)
+        bot.online.close()
+        return {"ok": True, "boT_Uid": login["uid"], "msg": "Emote equipped and sent"}
+    except Exception as exc:
+        print("[api] request failed:", exc)
+        return {"ok": False, "error": str(exc)}
 
 @app.get("/rishu")
-def rishu():
-    tc, eid, tuid = request.args.get("Tc"), request.args.get("Emote_id"), request.args.get("Target_Uid")
-    if not tc or not eid or not tuid: return jsonify(ok=False, error="Tc, Emote_id, Target_Uid required"), 400
+def rishu_endpoint():
+    team_code = (request.args.get("Tc") or "").strip()
+    emote_value = (request.args.get("Emote_id") or "").strip()
+    target_value = (request.args.get("Target_Uid") or request.args.get("Target_uid") or request.args.get("target_uid") or "").strip()
     
-    acc = random.choice(BACKUP_ACCOUNTS)
-    lg = get_session(acc)
-    if not lg: return jsonify(ok=False, error="Login failed"), 500
-        
-    key, iv = bytes.fromhex(lg["key"]), bytes.fromhex(lg["iv"])
-    auth_pkts = [(op, bytes([op, REGION_BYTE.get(lg["region"].upper(), 0x15)]) + int(lg["uid"]).to_bytes(8, "big") + int(lg["kts"]).to_bytes(4, "big") + b"\x00\x00\x00\x00" + struct.pack(">I", len(aes_enc(lg["jwt"].encode(), key, iv))) + aes_enc(lg["jwt"].encode(), key, iv)) for op in ONLINE_OPCODES]
+    if not team_code.isdigit(): return jsonify(ok=False, error="Tc must be numeric"), 400
+    if not emote_value: emote_value = str(DEFAULT_EMOTE_ID)
+    if not emote_value.isdigit(): return jsonify(ok=False, error="Emote_id must be numeric"), 400
+    if target_value and not target_value.isdigit(): return jsonify(ok=False, error="Target_Uid must be numeric"), 400
     
-    try:
-        conn = Conn(lg["online_ip"], lg["online_port"], auth_pkts)
-        conn.connect()
-        # Join + Emote Packet Building
-        inner = pb_build([(1, 0, int(lg["uid"])), (2, 0, int(eid)), (5, 2, pb_build([(1, 0, int(tuid)), (3, 0, int(eid))]))])
-        payload = pb_build([(1, 0, 21), (2, 2, inner)])
-        conn.sock.sendall(bytes.fromhex("0514") + struct.pack(">I", len(aes_enc(payload, key, iv))) + aes_enc(payload, key, iv))
-        time.sleep(1.0)
-        conn.sock.close()
-        return jsonify(ok=True, msg=f"Sent via {lg['uid']}")
-    except Exception as e:
-        return jsonify(ok=False, error=str(e)), 500
+    with _api_lock:
+        result = run_api_emote(team_code, int(emote_value), int(target_value) if target_value else None)
+    return jsonify(result)
 
 @app.get("/")
 def health(): return jsonify(ok=True, status="Running")
