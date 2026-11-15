@@ -13,11 +13,7 @@ except ImportError:
 
 # ═══════════ CONFIG & BACKUP ACCOUNTS ═══════════
 BACKUP_ACCOUNTS = [
-    {"uid": "8455985312", "pass": "Pass_B6F0418685FE0470", "region": "PK"},
-    {"uid": "8455985610", "pass": "Pass_04094031D2C60265", "region": "PK"},
-    {"uid": "8455985601", "pass": "Pass_E7A35576F4B1DFA2", "region": "PK"},
-    {"uid": "8448854742", "pass": "Pass_9053C8936F47B3A9", "region": "PK"},
-    {"uid": "8448910654", "pass": "Pass_49E13B98067393CA", "region": "PK"},
+    {"uid": "8457006743", "pass": "Pass_DC41A5900E6B6794", "region": "PK"}
 ]
 
 STATIC_KEY = b"Yg&tc%DEuh6%Zc^8"
