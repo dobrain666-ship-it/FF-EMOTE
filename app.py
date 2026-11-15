@@ -109,14 +109,14 @@ def _s(fields, n, default=""):
 def do_login(account):
     uid, password = account["uid"], account["pass"]
     body = urllib.parse.urlencode({"uid": uid, "password": password, "response_type": "token", "client_type": "2", "client_secret": CLIENT_SECRET, "client_id": APP_ID}).encode()
-    st, raw = http_post(OAUTH_URL, body, {"User-Agent": "GarenaMSDK/4.0.19P9", "Content-Type": "application/x-www-form-urlencoded"}, True, 20)
+    st, raw = http_post(OAUTH_URL, body, {"User-Agent": "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;en;IN;)", "Content-Type": "application/x-www-form-urlencoded"}, True, 20)
     j = json.loads(raw)
-    d = {3: datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 4: "free fire", 5: 1, 7: CLIENT_VERSION, 22: j["open_id"], 26: account["region"], 29: j["access_token"]}
-    st, raw = http_post(MAJOR_LOGIN_URL, aes_enc(pb_encode(d)), {"User-Agent": "UnityPlayer/2018.4.12f1", "X-GA": "v1 1"}, True)
+    d = {3: datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 4: "free fire", 5: 1, 7: CLIENT_VERSION, 22: j["open_id"], 26: account["region"], 29: j["access_token"], 57: "1ac4b80ecf0478a44203bf8fac6120f5"}
+    st, raw = http_post(MAJOR_LOGIN_URL, aes_enc(pb_encode(d)), {"User-Agent": "UnityPlayer/2022.3.47f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)", "X-GA": "v1 1", "ReleaseVersion": "OB55", "X-Unity-Version": "2022.3.47f1"}, True)
     r = parse_response(raw, lambda f: True)
     bot_uid, jwt = pb_get(r, 1), _s(r, 8)
     key, iv = pb_get(r, 22), pb_get(r, 23)
-    st, raw = http_post(_s(r, 10).rstrip("/") + "/GetLoginData", aes_enc(pb_encode(d)), {"User-Agent": "UnityPlayer/2018.4.12f1", "X-GA": "v1 1", "Authorization": "Bearer " + jwt}, True)
+    st, raw = http_post(_s(r, 10).rstrip("/") + "/GetLoginData", aes_enc(pb_encode(d)), {"User-Agent": "UnityPlayer/2022.3.47f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)", "X-GA": "v1 1", "ReleaseVersion": "OB55", "X-Unity-Version": "2022.3.47f1", "Authorization": "Bearer " + jwt}, True)
     r2 = parse_response(raw, lambda f: True)
     return {"uid": bot_uid, "jwt": jwt, "key": key.hex(), "iv": iv.hex(), "kts": pb_get(r, 21), "online_ip": _s(r2, 14).split(":")[0], "online_port": int(_s(r2, 14).split(":")[1]), "region": _s(r2, 3, account["region"])}
 
