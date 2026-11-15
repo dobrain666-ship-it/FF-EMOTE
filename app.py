@@ -7,10 +7,14 @@ from Crypto.Util.Padding import pad, unpad
 
 # ── Vercel par Pb2 ko dhundhne ke liye path set ──
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, "/var/task") # Vercel path fix
+
+login_engine = None
 try:
     import login_engine
-except ImportError as e:
-    print(f"[-] Failed to import login_engine: {e}")
+    print("[+] login_engine imported successfully!", flush=True)
+except Exception as e:
+    print(f"[-] FATAL: Could not import login_engine. Error: {e}", flush=True)
 
 # ═══════════ REDIS SETUP ═══════════
 try:
