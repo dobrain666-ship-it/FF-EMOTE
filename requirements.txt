@@ -1,8 +1,8 @@
 Flask==3.0.0
-pycryptodome==3.19.0
-upstash-redis==1.1.0
 requests
-protobuf>=4.25.3
 httpx
 google-play-scraper
-grpcio
+protobuf>=4.25.3
+pycryptodome==3.19.0
+upstash-redis==1.1.0
+gunicorn

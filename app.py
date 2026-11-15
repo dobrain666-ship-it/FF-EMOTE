@@ -5,12 +5,18 @@ from datetime import datetime
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-# ── Vercel par Pb2 ko dhundhne ke liye path set ──
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ═══════════ PATH FIX FOR VERCEL ═══════════
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, os.path.join(BASE_DIR, "Pb2"))
 sys.path.insert(0, "/var/task")
 
-# Vercel par import fail hone par seedha crash karega taaki log me asli error dikhe
-import login_engine
+try:
+    import login_engine
+    print("[+] login_engine imported successfully!", flush=True)
+except Exception as e:
+    print(f"[-] FATAL ERROR importing login_engine: {e}", flush=True)
+    raise e
 
 # ═══════════ REDIS SETUP ═══════════
 try:
@@ -19,7 +25,7 @@ try:
 except ImportError:
     redis = None
 
-# ═══════════ CONFIG ═══════════
+# ═══════════ CONFIG & BACKUP ACCOUNTS ═══════════
 BACKUP_ACCOUNTS = [
     {"uid": "8455985312", "pass": "Pass_B6F0418685FE0470", "region": "PK"},
     {"uid": "8455985610", "pass": "Pass_04094031D2C60265", "region": "PK"},
@@ -35,7 +41,8 @@ AUTH_OPCODES = (0x93, 0x95, 0x89, 0x7B, 0x69, 0x8F, 0x78, 0x83)
 ONLINE_OPCODES = (0x8D, 0x86, 0x67) + AUTH_OPCODES
 
 # ═══════════ CRYPTO & PROTOBUF HELPERS ═══════════
-def aes_enc(data, key=STATIC_KEY, iv=STATIC_IV): return AES.new(key, AES.MODE_CBC, iv).encrypt(pad(data, 16))
+def aes_enc(data, key=STATIC_KEY, iv=STATIC_IV): 
+    return AES.new(key, AES.MODE_CBC, iv).encrypt(pad(data, 16))
 
 def _wv(n):
     out = bytearray()
@@ -64,7 +71,6 @@ def do_login(account):
             print(f"[-] {uid} login_engine returned None", flush=True)
             return None
         
-        # login_engine ka return format map karke cache me save karo
         session = {
             "uid": int(r.get("bot_uid")),
             "jwt": r.get("token"),
@@ -111,13 +117,18 @@ class Conn:
             s = socket.create_connection((self.host, self.port), timeout=15)
             s.sendall(pkt)
             s.settimeout(4.0)
-            if len(s.recv(5)) == 5: self.sock = s; return
+            if len(s.recv(5)) == 5: 
+                self.sock = s; 
+                return
             s.close()
         raise RuntimeError("TCP Auth failed")
 
 app = Flask(__name__)
+
 @app.after_request
-def cors(res): res.headers["Access-Control-Allow-Origin"] = "*"; return res
+def cors(res): 
+    res.headers["Access-Control-Allow-Origin"] = "*"
+    return res
 
 @app.get("/api/refresh")
 def refresh_all():
@@ -129,29 +140,49 @@ def refresh_all():
 
 @app.get("/rishu")
 def rishu():
-    tc, eid, tuid = request.args.get("Tc"), request.args.get("Emote_id"), request.args.get("Target_Uid")
+    tc = request.args.get("Tc")
+    eid = request.args.get("Emote_id")
+    tuid = request.args.get("Target_Uid")
+    
+    if not tc or not eid or not tuid:
+        return jsonify(ok=False, error="Tc, Emote_id, and Target_Uid are required"), 400
+
     acc = random.choice(BACKUP_ACCOUNTS)
     try:
         lg = get_session(acc)
-        if not lg: return jsonify(ok=False, error="Login failed"), 500
+        if not lg: 
+            return jsonify(ok=False, error="Login failed"), 500
         
         key, iv = bytes.fromhex(lg["key"]), bytes.fromhex(lg["iv"])
-        auth_pkts = [(op, bytes([op, REGION_BYTE.get(lg["region"].upper(), 0x15)]) + int(lg["uid"]).to_bytes(8, "big") + int(lg["kts"]).to_bytes(4, "big") + b"\x00\x00\x00\x00" + struct.pack(">I", len(aes_enc(lg["jwt"].encode(), key, iv))) + aes_enc(lg["jwt"].encode(), key, iv)) for op in ONLINE_OPCODES]
         
+        # Build Auth Packets
+        auth_pkts = []
+        for op in ONLINE_OPCODES:
+            enc_jwt = aes_enc(lg["jwt"].encode(), key, iv)
+            pkt = bytes([op, REGION_BYTE.get(lg["region"].upper(), 0x15)]) + int(lg["uid"]).to_bytes(8, "big") + int(lg["kts"]).to_bytes(4, "big") + b"\x00\x00\x00\x00" + struct.pack(">I", len(enc_jwt)) + enc_jwt
+            auth_pkts.append((op, pkt))
+            
         conn = Conn(lg["online_ip"], lg["online_port"], auth_pkts)
         conn.connect()
         
+        # Build Emote Packet
         inner = pb_build([(1, 0, int(lg["uid"])), (2, 0, int(eid)), (5, 2, pb_build([(1, 0, int(tuid)), (3, 0, int(eid))]))])
         payload = pb_build([(1, 0, 21), (2, 2, inner)])
-        emote_pkt = bytes.fromhex("0514") + struct.pack(">I", len(aes_enc(payload, key, iv))) + aes_enc(payload, key, iv)
+        enc_emote = aes_enc(payload, key, iv)
+        emote_pkt = bytes.fromhex("0514") + struct.pack(">I", len(enc_emote)) + enc_emote
         
         conn.sock.sendall(emote_pkt)
         time.sleep(1.0)
         conn.sock.close()
+        
         return jsonify(ok=True, msg=f"Sent via {lg['uid']}")
     except Exception as e:
         print(f"[-] Emote Error: {e}", flush=True)
         return jsonify(ok=False, error=str(e)), 500
+
+@app.get("/")
+def health():
+    return jsonify(ok=True, status="Online", msg="Devils Will Rise API")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
