@@ -16,16 +16,14 @@ try:
     import login_engine
     print("[+] login_engine imported successfully!", flush=True)
 except Exception as e:
-    print(f"[-] CRITICAL WARNING: Failed to import login_engine: {e}", flush=True)
+    print(f"[-] CRITICAL: login_engine failed: {e}", flush=True)
 
-# ═══════════ REDIS SETUP ═══════════
 try:
     from upstash_redis import Redis
     redis = Redis(url="https://honest-cod-92290.upstash.io", token="gQAAAAAAAWiCAAIgcDE3NjI3NDFmM2MyYzU0MzVlOWY3Yjc5YzRlYWVlNzRlZQ")
 except ImportError:
     redis = None
 
-# ═══════════ CONFIG & BACKUP ACCOUNTS ═══════════
 BACKUP_ACCOUNTS = [
     {"uid": "8455985312", "pass": "Pass_B6F0418685FE0470", "region": "PK"},
     {"uid": "8455985610", "pass": "Pass_04094031D2C60265", "region": "PK"},
@@ -40,7 +38,6 @@ REGION_BYTE = {"BD": 0x19, "IND": 0x14, "PK": 0x15}
 AUTH_OPCODES = (0x93, 0x95, 0x89, 0x7B, 0x69, 0x8F, 0x78, 0x83)
 ONLINE_OPCODES = (0x8D, 0x86, 0x67) + AUTH_OPCODES
 
-# ═══════════ CRYPTO & PROTOBUF HELPERS ═══════════
 def aes_enc(data, key=STATIC_KEY, iv=STATIC_IV): 
     return AES.new(key, AES.MODE_CBC, iv).encrypt(pad(data, 16))
 
@@ -58,11 +55,13 @@ def pb_build(fields):
         out += _wv(v) if w == 0 else (_wv(len(v)) + v if w == 2 else v)
     return bytes(out)
 
-# ═══════════ LOGIN VIA login_engine ═══════════
 def do_login(account):
     uid, password, region = account["uid"], account["pass"], account["region"]
+    if not login_engine:
+        print(f"[-] login_engine is None, cannot login {uid}", flush=True)
+        return None
+        
     print(f"\n[DEBUG] Logging in {uid} via login_engine...", flush=True)
-    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -70,7 +69,6 @@ def do_login(account):
         if not r:
             print(f"[-] {uid} login_engine returned None", flush=True)
             return None
-        
         session = {
             "uid": int(r.get("bot_uid")),
             "jwt": r.get("token"),
@@ -108,7 +106,6 @@ def get_session(account):
         except Exception as e: print("Redis Save Err:", e)
     return session
 
-# ═══════════ TCP CONNECT & EMOTE ═══════════
 class Conn:
     def __init__(self, host, port, auth_pkts):
         self.host, self.port, self.auth_pkts = host, int(port), auth_pkts
@@ -155,7 +152,6 @@ def rishu():
         
         key, iv = bytes.fromhex(lg["key"]), bytes.fromhex(lg["iv"])
         
-        # Build Auth Packets
         auth_pkts = []
         for op in ONLINE_OPCODES:
             enc_jwt = aes_enc(lg["jwt"].encode(), key, iv)
@@ -165,7 +161,6 @@ def rishu():
         conn = Conn(lg["online_ip"], lg["online_port"], auth_pkts)
         conn.connect()
         
-        # Build Emote Packet
         inner = pb_build([(1, 0, int(lg["uid"])), (2, 0, int(eid)), (5, 2, pb_build([(1, 0, int(tuid)), (3, 0, int(eid))]))])
         payload = pb_build([(1, 0, 21), (2, 2, inner)])
         enc_emote = aes_enc(payload, key, iv)
@@ -182,7 +177,7 @@ def rishu():
 
 @app.get("/")
 def health():
-    return jsonify(ok=True, status="Online", msg="Devils Will Rise API")
+    return jsonify(ok=True, status="Online", msg="API Running")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))

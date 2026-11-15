@@ -5,4 +5,4 @@ google-play-scraper
 protobuf
 pycryptodome
 upstash-redis
-gunicorn
+blackboxprotobuf
